@@ -60,6 +60,7 @@ semantic-phase-transition/
 - 方向ベクトル ê_A, ê_B は**最終レイヤー**の残差ストリームから取得する（そこが最も意味的に分化している）
 - GPU メモリ: GPT-2 small は CPU でも動く。large は ~3GB VRAM 必要
 - 実験の優先順位: exp1 → exp2 → exp4 → exp5 → exp3 → exp6（まず基本測定、次にフィット）
+- **デバイス: M1 Mac では `--device mps` を使用する**（CPU比 2.7x〜4.4x 高速）
 
 ## よく使うコマンド
 
@@ -68,11 +69,11 @@ semantic-phase-transition/
 pip install torch transformers transformer-lens numpy matplotlib scipy
 
 # 実験1を実行
-python experiments/exp1_basic.py --model gpt2 --device cpu
+python experiments/exp1_basic_v2.py --model gpt2 --device mps
 
 # 全実験を順番に実行
-python experiments/exp1_basic.py --model gpt2-medium && \
-python experiments/exp2_landau.py --model gpt2-medium
+python experiments/exp1_basic_v2.py --model gpt2-medium --device mps && \
+python experiments/exp2_landau.py --model gpt2-medium --device mps
 ```
 
 ## 関連研究のキーワード
