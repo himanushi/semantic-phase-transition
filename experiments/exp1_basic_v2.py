@@ -2,10 +2,11 @@
 
 Improvements over v1:
 - All disambiguating context placed BEFORE the target word (causal mask aware)
-- Direction vectors averaged over 3-5 unambiguous prompts per interpretation
-- cos(e_A, e_B) < 0.92 threshold to filter poorly separated words
-- 9 ambiguous words tested (bank, bat, crane, spring, rock, match, light, pitcher, bass)
-- Multi-model support (GPT-2 small + medium)
+- Direction vectors: both averaged (e_A, e_B) and contrastive (e_diff = mean_A - mean_B)
+- Contrastive order parameter: sigma(l) = cos(phi(l), e_diff), more robust
+  when cos(e_A, e_B) is high
+- 9 ambiguous words tested
+- Multi-model support
 """
 
 import argparse
@@ -20,12 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from transformer_lens import HookedTransformer
 
-from src.direction import compute_direction_vectors, find_token_position
-from src.order_parameter import compute_order_parameter
+from src.direction import (
+    compute_contrastive_direction,
+    compute_direction_vectors,
+    find_token_position,
+)
+from src.order_parameter import compute_order_parameter_contrastive
 from src.plotting import plot_derivative, plot_order_parameter, plot_order_parameter_multi_word
 from src.prompts import DIRECTION_PROMPTS, EXPERIMENT_PROMPTS
-
-COS_THRESHOLD = 0.92
 
 
 def run_experiment(
@@ -50,14 +53,13 @@ def run_experiment(
     if words is None:
         words = list(DIRECTION_PROMPTS.keys())
 
-    # --- Phase 1: 方向ベクトル計算 & フィルタリング ---
+    # --- Phase 1: 方向ベクトル計算 ---
     print(f"\n{'='*60}")
-    print("Phase 1: Direction vectors & filtering")
+    print("Phase 1: Direction vectors (averaged + contrastive)")
     print(f"{'='*60}")
 
     direction_info: dict[str, dict] = {}
-    accepted_words: list[str] = []
-    rejected_words: list[str] = []
+    valid_words: list[str] = []
 
     for word in words:
         dp = DIRECTION_PROMPTS[word]
@@ -67,38 +69,38 @@ def run_experiment(
             e_A, e_B = compute_direction_vectors(
                 model, dp["prompts_A"], dp["prompts_B"], word, device
             )
+            e_diff = compute_contrastive_direction(
+                model, dp["prompts_A"], dp["prompts_B"], word, device
+            )
         except ValueError as e:
             print(f"    SKIP: {e}")
-            rejected_words.append(word)
             continue
 
         cos_AB = torch.dot(e_A, e_B).item()
-        print(f"    cos(e_A, e_B) = {cos_AB:.4f}", end="")
+        print(f"    cos(e_A, e_B) = {cos_AB:.4f}")
 
-        if cos_AB >= COS_THRESHOLD:
-            print(f"  -> REJECTED (>= {COS_THRESHOLD})")
-            rejected_words.append(word)
-        else:
-            print(f"  -> ACCEPTED")
-            accepted_words.append(word)
-            direction_info[word] = {"e_A": e_A, "e_B": e_B, "cos_AB": cos_AB}
+        valid_words.append(word)
+        direction_info[word] = {"e_A": e_A, "e_B": e_B, "e_diff": e_diff, "cos_AB": cos_AB}
 
-    print(f"\n  Accepted: {accepted_words}")
-    print(f"  Rejected: {rejected_words}")
+    # cos(e_A, e_B) でソート（分離度が高い順に表示）
+    valid_words.sort(key=lambda w: direction_info[w]["cos_AB"])
+    print(f"\n  Words by separation (best first):")
+    for w in valid_words:
+        print(f"    {w:<10} cos={direction_info[w]['cos_AB']:.4f}")
 
-    # --- Phase 2: 秩序変数の測定 ---
+    # --- Phase 2: 秩序変数の測定（対比的方向ベクトル） ---
     print(f"\n{'='*60}")
-    print("Phase 2: Order parameter measurement")
+    print("Phase 2: Order parameter measurement (contrastive)")
     print(f"{'='*60}")
 
     all_results: dict[str, dict] = {}
     all_sigmas: dict[str, dict[str, np.ndarray]] = {}
 
-    for word in accepted_words:
+    for word in valid_words:
         info = direction_info[word]
         dp = DIRECTION_PROMPTS[word]
         prompts = EXPERIMENT_PROMPTS[word]
-        e_A, e_B = info["e_A"], info["e_B"]
+        e_diff = info["e_diff"]
 
         print(f"\n  --- {word} ({dp['interpretation_A']} vs {dp['interpretation_B']}) ---")
 
@@ -118,10 +120,12 @@ def run_experiment(
                 continue
 
             print(f"    [{label}] \"{prompt_text}\"")
-            print(f"      tokens: {token_strs}")
-            print(f"      '{word}' at pos {pos} (of {len(token_strs)})")
+            print(f"      '{word}' at pos {pos}/{len(token_strs)-1}, "
+                  f"tokens: {token_strs}")
 
-            sigma = compute_order_parameter(model, prompt_text, word, e_A, e_B)
+            sigma = compute_order_parameter_contrastive(
+                model, prompt_text, word, e_diff
+            )
             word_sigmas[label] = sigma
 
             dsigma = np.diff(sigma)
@@ -135,7 +139,6 @@ def run_experiment(
                 "max_jump_layer": max_jump_idx,
                 "max_jump_value": float(dsigma[max_jump_idx]),
                 "target_position": pos,
-                "n_preceding_tokens": pos,  # causal maskで見えるトークン数
             }
             word_results[label] = result
 
@@ -170,36 +173,41 @@ def run_experiment(
             output_path=fig_dir / f"v2_sigma_all_{model_tag}.png",
         )
 
-    # --- Summary ---
+    # --- Summary table ---
     print(f"\n{'='*60}")
     print(f"SUMMARY — {model_name} ({n_layers} layers)")
     print(f"{'='*60}")
-    print(f"\n{'word':<10} {'cos(eA,eB)':<12} {'σ range':<10} {'σ_final(A)':<12} "
-          f"{'σ_final(B)':<12} {'max_jump':<20}")
-    print("-" * 76)
+    header = (f"{'word':<10} {'cos(eA,eB)':<12} {'σ range':<10} "
+              f"{'σ_f(strong_A)':<14} {'σ_f(strong_B)':<14} {'max |Δσ|':<20}")
+    print(f"\n{header}")
+    print("-" * len(header))
 
-    for word, res in all_results.items():
+    for word in valid_words:
+        if word not in all_results:
+            continue
+        res = all_results[word]
         pr = res["prompts"]
-        # strong_A, strong_B の σ_final を取得
+
         sf_A = pr.get("strong_A", {}).get("sigma_final", float("nan"))
         sf_B = pr.get("strong_B", {}).get("sigma_final", float("nan"))
-        # 全条件の max jump
+
+        all_ranges = [p.get("sigma_range", 0) for p in pr.values()]
+        sr = max(all_ranges) if all_ranges else 0
+
         jumps = [(p.get("max_jump_layer", -1), p.get("max_jump_value", 0))
                  for p in pr.values()]
         biggest = max(jumps, key=lambda x: abs(x[1]))
-        sr = max(p.get("sigma_range", 0) for p in pr.values())
 
-        print(f"{word:<10} {res['cos_AB']:<12.4f} {sr:<10.4f} {sf_A:<+12.4f} "
-              f"{sf_B:<+12.4f} L{biggest[0]}({biggest[1]:+.4f})")
+        print(f"{word:<10} {res['cos_AB']:<12.4f} {sr:<10.4f} "
+              f"{sf_A:<+14.4f} {sf_B:<+14.4f} L{biggest[0]}({biggest[1]:+.4f})")
 
     # JSON保存
     output = {
         "model": model_name,
         "n_layers": n_layers,
         "device": device,
-        "cos_threshold": COS_THRESHOLD,
-        "accepted_words": accepted_words,
-        "rejected_words": rejected_words,
+        "method": "contrastive",
+        "valid_words": valid_words,
         "words": all_results,
     }
     json_path = data_dir / f"exp1_v2_{model_tag}.json"
@@ -214,7 +222,9 @@ def run_experiment(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Experiment 1 v2: Improved phase transition detection")
+    parser = argparse.ArgumentParser(
+        description="Experiment 1 v2: Improved phase transition detection"
+    )
     parser.add_argument("--model", type=str, default="gpt2",
                         help="Model name (default: gpt2)")
     parser.add_argument("--device", type=str, default="cpu",
