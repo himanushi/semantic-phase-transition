@@ -7,8 +7,8 @@ from transformer_lens import HookedTransformer
 def find_token_position(tokens: torch.Tensor, target_word: str, model: HookedTransformer) -> int:
     """Find the position of target_word in tokenized input.
 
-    Searches through token strings for a match. Handles subword tokenization
-    by checking if the target word appears within the decoded token.
+    Searches backwards through token strings for the last match,
+    since the target word typically appears at/near the end of the prompt.
 
     Args:
         tokens: Tokenized input tensor.
@@ -22,19 +22,19 @@ def find_token_position(tokens: torch.Tensor, target_word: str, model: HookedTra
         ValueError: If the target word is not found.
     """
     token_strs = model.to_str_tokens(tokens)
-    # token_strs は list of list の場合がある
     if isinstance(token_strs[0], list):
         token_strs = token_strs[0]
 
-    # まず完全一致を試みる（空白付き）
-    for i, t in enumerate(token_strs):
-        stripped = t.strip().lower()
+    # 後ろから探索（対象語はプロンプト末尾付近にあることが多い）
+    # まず完全一致
+    for i in range(len(token_strs) - 1, -1, -1):
+        stripped = token_strs[i].strip().lower()
         if stripped == target_word.lower():
             return i
 
     # 部分一致にフォールバック
-    for i, t in enumerate(token_strs):
-        if target_word.lower() in t.lower():
+    for i in range(len(token_strs) - 1, -1, -1):
+        if target_word.lower() in token_strs[i].lower():
             return i
 
     raise ValueError(
@@ -44,42 +44,42 @@ def find_token_position(tokens: torch.Tensor, target_word: str, model: HookedTra
 
 def compute_direction_vectors(
     model: HookedTransformer,
-    prompt_A: str,
-    prompt_B: str,
+    prompts_A: list[str],
+    prompts_B: list[str],
     target_word: str,
     device: str = "cpu",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute direction vectors e_A and e_B from unambiguous contexts.
+    """Compute direction vectors by averaging over multiple unambiguous prompts.
 
-    Uses the final layer residual stream at the target token position
-    from two clearly disambiguating prompts.
+    For each interpretation, collects the final-layer residual stream at
+    the target token position from multiple prompts and averages them.
 
     Args:
         model: The HookedTransformer model.
-        prompt_A: Prompt clearly indicating interpretation A.
-        prompt_B: Prompt clearly indicating interpretation B.
+        prompts_A: List of prompts clearly indicating interpretation A.
+        prompts_B: List of prompts clearly indicating interpretation B.
         target_word: The ambiguous word to track.
         device: Computation device.
 
     Returns:
         Tuple of (e_A, e_B) normalized direction vectors.
     """
-    with torch.no_grad():
-        tokens_A = model.to_tokens(prompt_A)
-        _, cache_A = model.run_with_cache(prompt_A)
-        pos_A = find_token_position(tokens_A, target_word, model)
+    last_layer = model.cfg.n_layers - 1
 
-        tokens_B = model.to_tokens(prompt_B)
-        _, cache_B = model.run_with_cache(prompt_B)
-        pos_B = find_token_position(tokens_B, target_word, model)
+    def _collect_vectors(prompts: list[str]) -> torch.Tensor:
+        vectors = []
+        for prompt in prompts:
+            with torch.no_grad():
+                tokens = model.to_tokens(prompt)
+                _, cache = model.run_with_cache(prompt)
+                pos = find_token_position(tokens, target_word, model)
+                vec = cache["resid_post", last_layer][0, pos].clone()
+                vectors.append(vec)
+        # 平均して正規化
+        avg = torch.stack(vectors).mean(dim=0)
+        return avg / avg.norm()
 
-        # 最終レイヤーの残差ストリームから方向ベクトルを取得
-        last_layer = model.cfg.n_layers - 1
-        e_A = cache_A["resid_post", last_layer][0, pos_A].clone()
-        e_B = cache_B["resid_post", last_layer][0, pos_B].clone()
-
-        # 正規化
-        e_A = e_A / e_A.norm()
-        e_B = e_B / e_B.norm()
+    e_A = _collect_vectors(prompts_A)
+    e_B = _collect_vectors(prompts_B)
 
     return e_A, e_B
