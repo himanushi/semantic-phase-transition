@@ -42,6 +42,24 @@ def find_token_position(tokens: torch.Tensor, target_word: str, model: HookedTra
     )
 
 
+def _collect_residuals(
+    model: HookedTransformer,
+    prompts: list[str],
+    target_word: str,
+) -> list[torch.Tensor]:
+    """Collect final-layer residual stream vectors for target word from multiple prompts."""
+    last_layer = model.cfg.n_layers - 1
+    vectors = []
+    for prompt in prompts:
+        with torch.no_grad():
+            tokens = model.to_tokens(prompt)
+            _, cache = model.run_with_cache(prompt)
+            pos = find_token_position(tokens, target_word, model)
+            vec = cache["resid_post", last_layer][0, pos].clone()
+            vectors.append(vec)
+    return vectors
+
+
 def compute_direction_vectors(
     model: HookedTransformer,
     prompts_A: list[str],
@@ -51,8 +69,7 @@ def compute_direction_vectors(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute direction vectors by averaging over multiple unambiguous prompts.
 
-    For each interpretation, collects the final-layer residual stream at
-    the target token position from multiple prompts and averages them.
+    Returns individually normalized mean vectors for each interpretation.
 
     Args:
         model: The HookedTransformer model.
@@ -64,22 +81,45 @@ def compute_direction_vectors(
     Returns:
         Tuple of (e_A, e_B) normalized direction vectors.
     """
-    last_layer = model.cfg.n_layers - 1
+    vecs_A = _collect_residuals(model, prompts_A, target_word)
+    vecs_B = _collect_residuals(model, prompts_B, target_word)
 
-    def _collect_vectors(prompts: list[str]) -> torch.Tensor:
-        vectors = []
-        for prompt in prompts:
-            with torch.no_grad():
-                tokens = model.to_tokens(prompt)
-                _, cache = model.run_with_cache(prompt)
-                pos = find_token_position(tokens, target_word, model)
-                vec = cache["resid_post", last_layer][0, pos].clone()
-                vectors.append(vec)
-        # 平均して正規化
-        avg = torch.stack(vectors).mean(dim=0)
-        return avg / avg.norm()
+    mean_A = torch.stack(vecs_A).mean(dim=0)
+    mean_B = torch.stack(vecs_B).mean(dim=0)
 
-    e_A = _collect_vectors(prompts_A)
-    e_B = _collect_vectors(prompts_B)
+    e_A = mean_A / mean_A.norm()
+    e_B = mean_B / mean_B.norm()
 
     return e_A, e_B
+
+
+def compute_contrastive_direction(
+    model: HookedTransformer,
+    prompts_A: list[str],
+    prompts_B: list[str],
+    target_word: str,
+    device: str = "cpu",
+) -> torch.Tensor:
+    """Compute a single contrastive direction vector: mean_A - mean_B, normalized.
+
+    This captures the dimension along which the two meanings maximally differ,
+    which is more robust when e_A and e_B have high cosine similarity.
+
+    Args:
+        model: The HookedTransformer model.
+        prompts_A: List of prompts clearly indicating interpretation A.
+        prompts_B: List of prompts clearly indicating interpretation B.
+        target_word: The ambiguous word to track.
+        device: Computation device.
+
+    Returns:
+        Normalized contrastive direction vector (e_A_mean - e_B_mean) / ||...||.
+    """
+    vecs_A = _collect_residuals(model, prompts_A, target_word)
+    vecs_B = _collect_residuals(model, prompts_B, target_word)
+
+    mean_A = torch.stack(vecs_A).mean(dim=0)
+    mean_B = torch.stack(vecs_B).mean(dim=0)
+
+    diff = mean_A - mean_B
+    return diff / diff.norm()
