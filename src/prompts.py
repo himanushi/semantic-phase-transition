@@ -2,6 +2,11 @@
 
 All prompts place disambiguating context BEFORE the target word,
 respecting the causal attention mask of decoder-only models.
+
+Includes:
+  DIRECTION_PROMPTS - for computing contrastive direction vectors
+  EXPERIMENT_PROMPTS - for exp1/exp2 (5 conditions per word)
+  GRADIENT_PROMPTS - for exp3 (10-step context gradient per direction)
 """
 
 
