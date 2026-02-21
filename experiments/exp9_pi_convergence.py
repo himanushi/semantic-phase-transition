@@ -137,32 +137,45 @@ def measure_g_for_model(
                 except ValueError:
                     sigma_list.append(None)
 
-        # Define h from final-layer σ
-        all_h = []
+        # Define h from final-layer σ, with ordinal fallback
+        all_h_sigma = []  # h from σ_final
+        all_h_ordinal = []  # h from prompt ordering
         all_sigma = []
-        for s_list in [sigmas_A, sigmas_B]:
-            for s in s_list:
-                if s is not None:
-                    all_h.append(s[-1])
-                    all_sigma.append(s)
+        n_A = len(prompts["A"])
+        n_B = len(prompts["B"])
 
-        if len(all_h) < 5:
-            print(f"      Too few valid prompts ({len(all_h)}), skipping")
+        for i, s in enumerate(sigmas_A):
+            if s is not None:
+                all_h_sigma.append(s[-1])
+                all_h_ordinal.append(i / max(n_A - 1, 1))  # 0 to 1
+                all_sigma.append(s)
+        for i, s in enumerate(sigmas_B):
+            if s is not None:
+                all_h_sigma.append(s[-1])
+                all_h_ordinal.append(-i / max(n_B - 1, 1))  # 0 to -1
+                all_sigma.append(s)
+
+        if len(all_sigma) < 5:
+            print(f"      Too few valid prompts ({len(all_sigma)}), skipping")
             continue
 
-        h_arr = np.array(all_h)
         sigma_mat = np.array(all_sigma)
-        max_abs = max(abs(h_arr.max()), abs(h_arr.min()))
-        if max_abs < 1e-8:
-            print(f"      h range too small, skipping")
-            continue
-        h_arr = h_arr / max_abs
 
-        # Check h has enough variation for regression
+        # Try σ_final-based h first
+        h_arr = np.array(all_h_sigma)
+        max_abs = max(abs(h_arr.max()), abs(h_arr.min()))
+        if max_abs > 1e-8:
+            h_arr = h_arr / max_abs
+
         h_range = h_arr.max() - h_arr.min()
-        if h_range < 1e-6:
-            print(f"      h values all identical (range={h_range:.2e}), skipping")
-            continue
+        if h_range < 1e-4:
+            # Fallback: use ordinal h (prompt ordering weak→strong)
+            h_arr = np.array(all_h_ordinal)
+            h_range = h_arr.max() - h_arr.min()
+            if h_range < 1e-6:
+                print(f"      No h variation even with ordinal, skipping")
+                continue
+            print(f"      σ_final collapsed on CUDA, using ordinal h (range={h_range:.2f})")
 
         # Linear regression: σ(l) = slope * h + intercept
         n_pts = sigma_mat.shape[1]
