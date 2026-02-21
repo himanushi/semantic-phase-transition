@@ -158,6 +158,12 @@ def measure_g_for_model(
             continue
         h_arr = h_arr / max_abs
 
+        # Check h has enough variation for regression
+        h_range = h_arr.max() - h_arr.min()
+        if h_range < 1e-6:
+            print(f"      h values all identical (range={h_range:.2e}), skipping")
+            continue
+
         # Linear regression: σ(l) = slope * h + intercept
         n_pts = sigma_mat.shape[1]
         slopes = np.zeros(n_pts)
