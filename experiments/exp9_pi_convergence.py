@@ -29,6 +29,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 # -------------------------------------------------------------------
+# JSON helper
+# -------------------------------------------------------------------
+
+class NumpyEncoder(json.JSONEncoder):
+    """Handle numpy types in JSON serialization."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
+# -------------------------------------------------------------------
 # Constants
 # -------------------------------------------------------------------
 
@@ -106,7 +124,7 @@ def measure_g_for_model(
 
     print(f"    Loading model: {model_name}...")
     t0 = time.time()
-    model = HookedTransformer.from_pretrained(model_name, device=device)
+    model = HookedTransformer.from_pretrained(model_name, device=device, dtype=torch.float32)
     n_layers = model.cfg.n_layers
     d_model = model.cfg.d_model
     print(f"    Loaded in {fmt_time(time.time()-t0)} — {n_layers} layers, d={d_model}")
@@ -141,7 +159,7 @@ def measure_g_for_model(
             print(f"      Too few valid prompts, skipping")
             continue
 
-        # Define h (same function as exp3)
+        # Define h (same function as exp3: h from final-layer σ)
         h_values, sigma_matrix, prompt_indices = define_h_from_final_layer(
             grad_sigmas["A"], grad_sigmas["B"]
         )
@@ -150,40 +168,68 @@ def measure_g_for_model(
             print(f"      Too few h values ({len(h_values)}), skipping")
             continue
 
-        # Check if h has enough variation (CUDA precision issue)
+        # Check if h has enough variation
         h_range = float(h_values.max() - h_values.min())
+        h_source = "σ_final"
+
         if h_range < 1e-4:
-            # Fallback: use ordinal h (prompt ordering weak→strong)
-            # GRADIENT_PROMPTS are ordered from neutral to strong context
-            print(f"      σ_final has no variation (range={h_range:.2e}), using ordinal h")
-            n_A = len(GRADIENT_PROMPTS[word]["A"])
-            n_B = len(GRADIENT_PROMPTS[word]["B"])
+            # Fallback 1: use σ at middle layer (0.75*L) as h
+            # Final layer collapses due to unembedding; middle layers retain context
+            h_layer = int(0.75 * n_layers)
+            print(f"      σ_final collapsed (range={h_range:.2e}), trying σ at layer {h_layer}...")
 
-            h_ordinal = []
-            sigma_list = []
-            for i, s in enumerate(grad_sigmas["A"]):
+            all_h_mid = []
+            all_sigma_mid = []
+            for s in grad_sigmas["A"]:
                 if s is not None:
-                    h_ordinal.append(i / max(n_A - 1, 1))  # 0 to 1
-                    sigma_list.append(s)
-            for i, s in enumerate(grad_sigmas["B"]):
+                    all_h_mid.append(s[h_layer])
+                    all_sigma_mid.append(s)
+            for s in grad_sigmas["B"]:
                 if s is not None:
-                    h_ordinal.append(-i / max(n_B - 1, 1))  # 0 to -1
-                    sigma_list.append(s)
+                    all_h_mid.append(s[h_layer])
+                    all_sigma_mid.append(s)
 
-            h_values = np.array(h_ordinal)
-            sigma_matrix = np.array(sigma_list)
+            h_arr_mid = np.array(all_h_mid)
+            max_abs = max(abs(h_arr_mid.max()), abs(h_arr_mid.min()))
+            if max_abs > 1e-8:
+                h_arr_mid = h_arr_mid / max_abs
 
-            # Sort by h
-            order = np.argsort(h_values)
-            h_values = h_values[order]
-            sigma_matrix = sigma_matrix[order]
+            h_range = float(h_arr_mid.max() - h_arr_mid.min())
+            if h_range > 1e-4:
+                h_values = h_arr_mid
+                sigma_matrix = np.array(all_sigma_mid)
+                order = np.argsort(h_values)
+                h_values = h_values[order]
+                sigma_matrix = sigma_matrix[order]
+                h_source = f"σ_L{h_layer}"
+                print(f"      Using σ at layer {h_layer} as h (range={h_range:.3f})")
+            else:
+                # Fallback 2: ordinal h (prompt ordering)
+                print(f"      Middle layer also collapsed, using ordinal h")
+                n_A = len(GRADIENT_PROMPTS[word]["A"])
+                n_B = len(GRADIENT_PROMPTS[word]["B"])
+                h_ordinal = []
+                sigma_list = []
+                for i, s in enumerate(grad_sigmas["A"]):
+                    if s is not None:
+                        h_ordinal.append(i / max(n_A - 1, 1))
+                        sigma_list.append(s)
+                for i, s in enumerate(grad_sigmas["B"]):
+                    if s is not None:
+                        h_ordinal.append(-i / max(n_B - 1, 1))
+                        sigma_list.append(s)
+                h_values = np.array(h_ordinal)
+                sigma_matrix = np.array(sigma_list)
+                order = np.argsort(h_values)
+                h_values = h_values[order]
+                sigma_matrix = sigma_matrix[order]
+                h_range = float(h_values.max() - h_values.min())
+                h_source = "ordinal"
+                if h_range < 1e-6:
+                    print(f"      No h variation at all, skipping")
+                    continue
 
-            h_range = float(h_values.max() - h_values.min())
-            if h_range < 1e-6:
-                print(f"      Still no variation, skipping")
-                continue
-
-        print(f"      h range: [{h_values.min():.3f}, {h_values.max():.3f}], n={len(h_values)}")
+        print(f"      h source: {h_source}, range: [{h_values.min():.3f}, {h_values.max():.3f}], n={len(h_values)}")
 
         # Linearity analysis (same function as exp3)
         linearity = analyze_linearity_per_layer(h_values, sigma_matrix)
@@ -262,7 +308,7 @@ def measure_g_for_model(
     json_path = output_dir / "data" / f"exp9_part_a_{tag}.json"
     json_path.parent.mkdir(parents=True, exist_ok=True)
     with open(json_path, "w") as f:
-        json.dump(result, f, indent=2)
+        json.dump(result, f, indent=2, cls=NumpyEncoder)
     print(f"    Saved: {json_path}")
 
     free_model(model, device)
@@ -552,7 +598,7 @@ def run_part_a(
         "ci_95_lower": float(ci_lower),
         "ci_95_upper": float(ci_upper),
         "sigma_pi": float(SIGMA_PI),
-        "within_95_ci": within_ci,
+        "within_95_ci": bool(within_ci),
     }
 
     return {"models": results, "convergence": convergence}
@@ -596,7 +642,7 @@ def measure_rotation_for_model(
 
     print(f"    Loading model: {model_name}...")
     t0 = time.time()
-    model = HookedTransformer.from_pretrained(model_name, device=device)
+    model = HookedTransformer.from_pretrained(model_name, device=device, dtype=torch.float32)
     n_layers = model.cfg.n_layers
     d_model = model.cfg.d_model
     print(f"    Loaded in {fmt_time(time.time()-t0)} — {n_layers} layers, d={d_model}")
@@ -670,7 +716,7 @@ def measure_rotation_for_model(
     json_path = output_dir / "data" / f"exp9_part_b_{tag}.json"
     json_path.parent.mkdir(parents=True, exist_ok=True)
     with open(json_path, "w") as f:
-        json.dump(result, f, indent=2)
+        json.dump(result, f, indent=2, cls=NumpyEncoder)
     print(f"    Saved: {json_path}")
 
     free_model(model, device)
@@ -1184,7 +1230,7 @@ def main():
 
     json_path = data_dir / "exp9_convergence.json"
     with open(json_path, "w") as f:
-        json.dump(summary, f, indent=2)
+        json.dump(summary, f, indent=2, cls=NumpyEncoder)
     print(f"\nUnified results saved: {json_path}")
 
     # --- VERDICT ---
