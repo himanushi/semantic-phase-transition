@@ -25,6 +25,7 @@ from scipy.special import erf
 from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 # -------------------------------------------------------------------
@@ -83,17 +84,25 @@ def measure_g_for_model(
 ) -> dict:
     """Measure g(l/L) for a single model from scratch.
 
-    Follows the same methodology as exp3 + exp3ef:
-    1. Compute contrastive direction vectors
-    2. Measure σ(l,h) for gradient prompts
-    3. Linear regression to get f(l) = dσ/dh
-    4. g(l/L) = f(l) / f_max
+    Uses the same functions as exp3_linear_response.py:
+    1. compute_gradient_sigmas() for σ profiles
+    2. define_h_from_final_layer() for h definition
+    3. analyze_linearity_per_layer() for f(l) extraction
+    4. g(l/L) = f(l) / f_max (same as exp3ef)
+
+    Falls back to ordinal h if σ_final has no variation (CUDA precision issue).
     """
     import torch
     from transformer_lens import HookedTransformer
     from src.direction import compute_contrastive_direction
-    from src.order_parameter import compute_order_parameter_contrastive
     from src.prompts import DIRECTION_PROMPTS, GRADIENT_PROMPTS
+
+    # Import exp3 functions directly to ensure identical logic
+    from experiments.exp3_linear_response import (
+        compute_gradient_sigmas,
+        define_h_from_final_layer,
+        analyze_linearity_per_layer,
+    )
 
     print(f"    Loading model: {model_name}...")
     t0 = time.time()
@@ -113,7 +122,7 @@ def measure_g_for_model(
         dp = DIRECTION_PROMPTS[word]
         print(f"    [{wi+1}/{len(words)}] {word} ({dp['interpretation_A']} vs {dp['interpretation_B']})...")
 
-        # Direction vector
+        # Direction vector (same as exp3)
         try:
             e_diff = compute_contrastive_direction(
                 model, dp["prompts_A"], dp["prompts_B"], word, device
@@ -122,67 +131,64 @@ def measure_g_for_model(
             print(f"      SKIP: {e}")
             continue
 
-        # Gradient prompts → σ profiles
-        prompts = GRADIENT_PROMPTS[word]
-        sigmas_A = []
-        sigmas_B = []
+        # Gradient sigmas (same function as exp3)
+        grad_sigmas = compute_gradient_sigmas(model, word, e_diff, device)
+        n_valid_A = sum(1 for s in grad_sigmas["A"] if s is not None)
+        n_valid_B = sum(1 for s in grad_sigmas["B"] if s is not None)
+        print(f"      Valid prompts: A={n_valid_A}/10, B={n_valid_B}/10")
 
-        for direction, sigma_list in [("A", sigmas_A), ("B", sigmas_B)]:
-            for prompt in prompts[direction]:
-                try:
-                    sigma = compute_order_parameter_contrastive(
-                        model, prompt, word, e_diff
-                    )
-                    sigma_list.append(sigma)
-                except ValueError:
-                    sigma_list.append(None)
-
-        # Define h from final-layer σ, with ordinal fallback
-        all_h_sigma = []  # h from σ_final
-        all_h_ordinal = []  # h from prompt ordering
-        all_sigma = []
-        n_A = len(prompts["A"])
-        n_B = len(prompts["B"])
-
-        for i, s in enumerate(sigmas_A):
-            if s is not None:
-                all_h_sigma.append(s[-1])
-                all_h_ordinal.append(i / max(n_A - 1, 1))  # 0 to 1
-                all_sigma.append(s)
-        for i, s in enumerate(sigmas_B):
-            if s is not None:
-                all_h_sigma.append(s[-1])
-                all_h_ordinal.append(-i / max(n_B - 1, 1))  # 0 to -1
-                all_sigma.append(s)
-
-        if len(all_sigma) < 5:
-            print(f"      Too few valid prompts ({len(all_sigma)}), skipping")
+        if n_valid_A < 3 or n_valid_B < 3:
+            print(f"      Too few valid prompts, skipping")
             continue
 
-        sigma_mat = np.array(all_sigma)
+        # Define h (same function as exp3)
+        h_values, sigma_matrix, prompt_indices = define_h_from_final_layer(
+            grad_sigmas["A"], grad_sigmas["B"]
+        )
 
-        # Try σ_final-based h first
-        h_arr = np.array(all_h_sigma)
-        max_abs = max(abs(h_arr.max()), abs(h_arr.min()))
-        if max_abs > 1e-8:
-            h_arr = h_arr / max_abs
+        if len(h_values) < 5:
+            print(f"      Too few h values ({len(h_values)}), skipping")
+            continue
 
-        h_range = h_arr.max() - h_arr.min()
+        # Check if h has enough variation (CUDA precision issue)
+        h_range = float(h_values.max() - h_values.min())
         if h_range < 1e-4:
             # Fallback: use ordinal h (prompt ordering weak→strong)
-            h_arr = np.array(all_h_ordinal)
-            h_range = h_arr.max() - h_arr.min()
-            if h_range < 1e-6:
-                print(f"      No h variation even with ordinal, skipping")
-                continue
-            print(f"      σ_final collapsed on CUDA, using ordinal h (range={h_range:.2f})")
+            # GRADIENT_PROMPTS are ordered from neutral to strong context
+            print(f"      σ_final has no variation (range={h_range:.2e}), using ordinal h")
+            n_A = len(GRADIENT_PROMPTS[word]["A"])
+            n_B = len(GRADIENT_PROMPTS[word]["B"])
 
-        # Linear regression: σ(l) = slope * h + intercept
-        n_pts = sigma_mat.shape[1]
-        slopes = np.zeros(n_pts)
-        for l in range(n_pts):
-            slope, _, _, _, _ = stats.linregress(h_arr, sigma_mat[:, l])
-            slopes[l] = slope
+            h_ordinal = []
+            sigma_list = []
+            for i, s in enumerate(grad_sigmas["A"]):
+                if s is not None:
+                    h_ordinal.append(i / max(n_A - 1, 1))  # 0 to 1
+                    sigma_list.append(s)
+            for i, s in enumerate(grad_sigmas["B"]):
+                if s is not None:
+                    h_ordinal.append(-i / max(n_B - 1, 1))  # 0 to -1
+                    sigma_list.append(s)
+
+            h_values = np.array(h_ordinal)
+            sigma_matrix = np.array(sigma_list)
+
+            # Sort by h
+            order = np.argsort(h_values)
+            h_values = h_values[order]
+            sigma_matrix = sigma_matrix[order]
+
+            h_range = float(h_values.max() - h_values.min())
+            if h_range < 1e-6:
+                print(f"      Still no variation, skipping")
+                continue
+
+        print(f"      h range: [{h_values.min():.3f}, {h_values.max():.3f}], n={len(h_values)}")
+
+        # Linearity analysis (same function as exp3)
+        linearity = analyze_linearity_per_layer(h_values, sigma_matrix)
+        slopes = np.array([lin["slope"] for lin in linearity])
+        r2_values = [lin["r2"] for lin in linearity]
 
         f_max = float(np.max(slopes))
         if f_max < 1e-8:
@@ -191,7 +197,8 @@ def measure_g_for_model(
 
         all_slopes[word] = slopes
         all_fmax[word] = f_max
-        print(f"      f_max = {f_max:.4f}, valid prompts = {len(all_h)}")
+        r2_mean = np.mean(r2_values)
+        print(f"      f_max = {f_max:.4f}, R²_mean = {r2_mean:.4f}")
 
     # Compute g(l/L) per word and mean
     g_dict = {}
