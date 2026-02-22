@@ -2,7 +2,7 @@
 
 ## プロジェクト概要
 
-LLMの内部における意味処理のダイナミクスと重み行列の圧縮可能性を検証したプロジェクト。現在、普遍浸透関数 g(l/L) における π の痕跡を探索中。
+LLMの内部における意味処理のダイナミクスと重み行列の圧縮可能性を検証したプロジェクト。現在、ヘッド削減＋線形Attention＋CoT回収による軽量高性能アーキテクチャを探索中。
 
 @README.md
 
@@ -16,40 +16,71 @@ LLMの内部における意味処理のダイナミクスと重み行列の圧�
 | exp4        | ⏭ スキップ | 臨界レイヤーが無いため不要                         |
 | exp5        | ⏭ スキップ | 相転移の境界線がないため不要                       |
 | exp6        | ✅ 完了     | PCA分散≠機能的重要度。K=140/144でようやくPPL 1.07x |
-| exp8A       | ✅ 完了     | σ=1/√π を棄却できず（p=0.535, 0.245）             |
+| exp8A       | ✅ 完了     | σ=1/√π を棄却できず（p=0.535, 0.245）              |
 | exp8B       | ✅ 完了     | medium で sin(πx^α/2) が BIC 最良                  |
 | exp8C       | ✅ 完了     | Θ/π≈1.58、整数倍に非収束だが π/2 に近い            |
-| exp9A       | 🔬 予定     | σ_free の4モデルスケーリング（Colab A100）          |
+| exp9A       | 🔬 中断     | CUDA精度問題で未完了                               |
 | exp9B       | 🔬 予定     | 累積回転角Θの4モデルスケーリング                   |
 | exp9C       | 🔬 予定     | cos_pi_0p の全モデル検証                           |
+| **exp10A**  | 🔬 **NOW**  | ヘッド個別ablation（ΔPPL測定）                     |
+| **exp10B**  | 🔬 予定     | 重要度ランキング + 分布可視化                      |
+| **exp10C**  | 🔬 予定     | 累積ablation（パレート曲線）                       |
+| **exp10D**  | 🔬 予定     | レイヤー内パターン分析                             |
+| exp10E-G    | 📋 設計済   | softmax線形化（Phase 1の結果次第）                 |
+| exp10H-J    | 📋 設計済   | CoT回収検証（Phase 2の結果次第）                   |
 
-## 現在の焦点: exp9（π収束検証）
+## 現在の焦点: exp10 Phase 1（ヘッド単位Ablation）
 
-**核心の問い**: σ_free はモデルサイズ→∞ で 1/√π に収束するか？
+**核心の問い**: 144ヘッド中、何個を削除してもperplexityが維持されるか？機能的重要度の分布はどうなっているか？
 
-**exp8の結果**:
-1. erf σ が 1/√π と整合的（8A: 両モデルで棄却できず）
-2. sin(πx^α/2) が medium で BIC 最良（8B）
-3. Θ/π ≈ π/2 の奇妙な一致（8C: 差0.6%）
+**exp6との関係**:
 
-**exp9の攻め筋**:
-1. exp9A: gpt2/medium/large/xl の4点で σ_free を測定し、1/n_layers→0 への外挿
-2. exp9B: 累積回転角Θのスケーリング法則を特定
-3. exp9C: データ点数が増えるほど cos_pi_0p が有利になるか検証
+- exp6はPCA基底でW_QKを分解 → 分散0.6%に機能集中を発見
+- exp10はヘッド単位で直接ablation → PCAでは見えない機能的構造を測定
+- exp6の「ヘッドの非冗長性」結論をヘッド単位で再検証
 
-**実行環境**: Google Colab A100（gpt2-xl まで対応）
+**最終ゴール（Phase 1-3全体）**:
+「Attentionを粗く・高速にし、浮いた計算をCoTに回す」アーキテクチャの実現可能性を検証。
 
-## 最終結論（exp1-6）
+- 小さいモデル × N回再帰推論 ≥ 大きいモデル × 1回推論（同一FLOPs）を目指す
 
-1. **圧縮目標（100x）は未達成**: PCAベースのW_QK圧縮は原理的に困難
-2. **意味浸透の普遍法則を発見**: σ(l,h) = h · f_max · g(l/L)、g の語間相関>0.96
-3. **低分散成分が機能を支配**: 分散0.6%の成分でperplexityが2.2x→1.07xに変化
+### exp10A: ヘッド個別ablation
+
+- GPT-2 small（12レイヤー × 12ヘッド = 144ヘッド）
+- 各ヘッドを1個ずつゼロアウト（attention output を0に置換）
+- WikiText-2 validation set でPPL測定（baseline: ~29.79）
+- 出力: 144個の ΔPPL 値
+
+### exp10B: 重要度ランキング
+
+- ΔPPL でソートした全144ヘッドのランキング
+- ヒストグラム + レイヤー×ヘッドのヒートマップ
+- べき乗則フィット（少数ヘッドに機能集中しているか）
+
+### exp10C: 累積ablation
+
+- 重要度の低い順にヘッドを1個ずつ累積削除
+- 「削除ヘッド数 vs PPL」のパレート曲線
+- PPL 1.1倍、1.5倍、2.0倍の閾値でそれぞれ何個削除可能かを記録
+
+### exp10D: レイヤー内パターン分析
+
+- 重要ヘッドの空間分布（浅い層 vs 深い層）
+- レイヤーごとの平均ΔPPL（どのレイヤーが最も機能的に重要か）
+- exp3の浸透関数 g(l/L) との対応（g(l/L)の傾きが大きい層のヘッドが重要か？）
+
+### 成功基準（Phase 1）
+
+1. **144ヘッド中30%以上（≥43ヘッド）がPPL劣化1.1倍未満で削除可能**
+2. **重要度分布がべき乗則に従う**（少数のヘッドに機能が集中）
+3. exp3の g(l/L) と重要度分布に相関がある
 
 ## 技術スタック
 
 - Python 3.10+, PyTorch, transformer-lens, matplotlib, scipy, numpy, scikit-learn, datasets
 - 対象モデル: GPT-2 (small/medium/large/xl)
 - デバイス: M1 Mac では `--device mps`、Colab では `--device cuda`
+- **CUDA使用時の注意**: `torch.backends.cuda.matmul.allow_tf32 = False` を必ず設定
 
 ## ディレクトリ構成
 
@@ -66,7 +97,8 @@ semantic-phase-transition/
 │   ├── exp6_basis.py           # 実験6 普遍基底 + 圧縮検証
 │   ├── exp7_residual_pca.py    # 実験7 残差ストリームΔφ PCA
 │   ├── exp8_pi_trace.py        # 実験8 π探索
-│   └── exp9_pi_convergence.py  # 実験9 π収束検証（Colab A100用）
+│   ├── exp9_pi_convergence.py  # 実験9 π収束検証（Colab A100用）
+│   └── exp10_head_ablation.py  # 実験10 ヘッド削減 + 線形Attention + CoT回収
 ├── src/
 │   ├── order_parameter.py
 │   ├── direction.py
@@ -85,7 +117,7 @@ semantic-phase-transition/
 - 型ヒント推奨
 - 実験スクリプトはargparseで `--model`, `--device`, `--output-dir` を受け付ける
 - 結果は `results/data/` にJSON、図は `results/figures/` にpng
-- **実験が完了したら `results/exp{N}_results.md` に結果レポートを書く**（例: `results/exp8_results.md`）
+- **実験が完了したら `results/exp{N}_results.md` に結果レポートを書く**（例: `results/exp10_results.md`）
 
 ## 将来の発展可能性
 
@@ -94,4 +126,5 @@ semantic-phase-transition/
 - PCA以外の分解手法（ICA, sparse coding）でW_QKの機能的構造を探索
 - 低分散成分の「中身」を解釈（どのような注意パターンを符号化しているか）
 - **exp9の結果次第**: 超球面拡散モデルの理論的定式化
-- **exp9**: σ_free が 1/√π に収束すれば、Pythia/LLaMA 系でも検証
+- **exp10の結果次第**: 線形Attention + CoT再帰アーキテクチャの本格設計
+- **長期ビジョン**: 小モデル×高速CoT再帰 ≥ 大モデル×1回推論の等FLOPs検証
