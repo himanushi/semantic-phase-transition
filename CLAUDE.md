@@ -24,8 +24,8 @@ LLMの内部における意味処理のダイナミクスと重み行列の圧�
 | exp9C       | 🔬 予定     | cos_pi_0p の全モデル検証                           |
 | exp10A-D    | ✅ 完了     | Phase 1: L0に機能集中、Zipf α=1.37、累積10ヘッド@1.1x |
 | exp10E-H    | ✅ 完了     | Phase 1.5: Mean-ablationで25ヘッド@1.1x（2.5x改善） |
-| **exp10 Ph2** | 📋 **NEXT** | Phase 2: softmax線形化（Go判定済）                 |
-| exp10 Ph3   | 📋 設計済   | Phase 3: CoT回収検証（Phase 2の結果次第）          |
+| exp10I-L    | ✅ 完了     | Phase 2: ReLU最良、30ヘッド@1.1x、kernel化で19%削減 |
+| **exp10 Ph3** | 📋 **NEXT** | Phase 3: CoT回収検証（Go判定済）                   |
 
 ## 現在の焦点: exp10 Phase 1（ヘッド単位Ablation）
 
