@@ -107,8 +107,6 @@ def measure_g_for_model(
     2. define_h_from_final_layer() for h definition
     3. analyze_linearity_per_layer() for f(l) extraction
     4. g(l/L) = f(l) / f_max (same as exp3ef)
-
-    Falls back to ordinal h if σ_final has no variation (CUDA precision issue).
     """
     import torch
     from transformer_lens import HookedTransformer
@@ -121,6 +119,15 @@ def measure_g_for_model(
         define_h_from_final_layer,
         analyze_linearity_per_layer,
     )
+
+    # CRITICAL: Disable TF32 on CUDA.
+    # PyTorch >= 1.12 defaults allow_tf32=True, which reduces float32 matmul
+    # to 10-bit mantissa. This destroys the subtle attention score differences
+    # between context-varying prompts, causing all σ values to collapse.
+    if device.startswith("cuda"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        print(f"    TF32 disabled for precise float32 computation")
 
     print(f"    Loading model: {model_name}...")
     t0 = time.time()
@@ -149,11 +156,26 @@ def measure_g_for_model(
             print(f"      SKIP: {e}")
             continue
 
+        # Diagnostic: e_diff properties
+        print(f"      e_diff norm: {e_diff.norm().item():.6f}, dtype: {e_diff.dtype}")
+
         # Gradient sigmas (same function as exp3)
         grad_sigmas = compute_gradient_sigmas(model, word, e_diff, device)
         n_valid_A = sum(1 for s in grad_sigmas["A"] if s is not None)
         n_valid_B = sum(1 for s in grad_sigmas["B"] if s is not None)
         print(f"      Valid prompts: A={n_valid_A}/10, B={n_valid_B}/10")
+
+        # Diagnostic: print σ at final layer for first few prompts
+        diag_vals_A = [f"{s[-1]:.6f}" for s in grad_sigmas["A"][:3] if s is not None]
+        diag_vals_B = [f"{s[-1]:.6f}" for s in grad_sigmas["B"][:3] if s is not None]
+        print(f"      σ_final sample A: {diag_vals_A}")
+        print(f"      σ_final sample B: {diag_vals_B}")
+        # Also check a middle layer
+        mid_l = n_layers // 2
+        diag_mid_A = [f"{s[mid_l]:.6f}" for s in grad_sigmas["A"][:3] if s is not None]
+        diag_mid_B = [f"{s[mid_l]:.6f}" for s in grad_sigmas["B"][:3] if s is not None]
+        print(f"      σ_L{mid_l} sample A: {diag_mid_A}")
+        print(f"      σ_L{mid_l} sample B: {diag_mid_B}")
 
         if n_valid_A < 3 or n_valid_B < 3:
             print(f"      Too few valid prompts, skipping")
@@ -392,10 +414,24 @@ def run_part_a(
             print(f"    Found existing exp9a data: {exp9a_path}")
             with open(exp9a_path) as f:
                 result = json.load(f)
-            results[mname] = result
-            elapsed = time.time() - t_start
-            print(f"    σ_free = {result['sigma_free']:.4f} (cached), R² = {result['erf_r2']:.4f}")
-            print(f"    Done in {fmt_time(elapsed)}")
+            # Sanity check: reject cached data with garbage σ values
+            sf = result.get("sigma_free", 0)
+            r2 = result.get("erf_r2", 0)
+            if 0.1 < sf < 5.0 and r2 > 0.5:
+                results[mname] = result
+                elapsed = time.time() - t_start
+                print(f"    σ_free = {result['sigma_free']:.4f} (cached), R² = {result['erf_r2']:.4f}")
+                print(f"    Done in {fmt_time(elapsed)}")
+            else:
+                print(f"    Cached data invalid (σ={sf:.4f}, R²={r2:.4f}), re-measuring...")
+                result = measure_g_for_model(mname, device, words, output_dir)
+                if result:
+                    results[mname] = result
+                    elapsed = time.time() - t_start
+                    print(f"    σ_free = {result['sigma_free']:.4f}, R² = {result['erf_r2']:.4f}")
+                    print(f"    Done in {fmt_time(elapsed)}")
+                else:
+                    print(f"    FAILED — no valid words")
 
         else:
             print(f"    No cached data found, measuring from scratch...")
@@ -639,6 +675,12 @@ def measure_rotation_for_model(
     from transformer_lens import HookedTransformer
 
     tag = model_tag(model_name)
+
+    # Disable TF32 for precise computation
+    if device.startswith("cuda"):
+        import torch as _torch
+        _torch.backends.cuda.matmul.allow_tf32 = False
+        _torch.backends.cudnn.allow_tf32 = False
 
     print(f"    Loading model: {model_name}...")
     t0 = time.time()
