@@ -25,53 +25,24 @@ LLMの内部における意味処理のダイナミクスと重み行列の圧�
 | exp10A-D    | ✅ 完了     | Phase 1: L0に機能集中、Zipf α=1.37、累積10ヘッド@1.1x |
 | exp10E-H    | ✅ 完了     | Phase 1.5: Mean-ablationで25ヘッド@1.1x（2.5x改善） |
 | exp10I-L    | ✅ 完了     | Phase 2: ReLU最良、30ヘッド@1.1x、kernel化で19%削減 |
-| **exp10 Ph3** | 📋 **NEXT** | Phase 3: CoT回収検証（Go判定済）                   |
+| exp10V      | ✅ 完了     | Validation: 250Kトークンで再検証、閾値-10ヘッド修正 |
+| exp10P      | ✅ 完了     | Phase 3: Best-of-N有効、self-refinement無効、仮説5部分棄却 |
 
-## 現在の焦点: exp10 Phase 1（ヘッド単位Ablation）
+## exp10 最終結論
 
-**核心の問い**: 144ヘッド中、何個を削除してもperplexityが維持されるか？機能的重要度の分布はどうなっているか？
+**仮説5「Attentionの精密さを下げ、浮いた計算をCoTに回すことで性能を維持できる」→ 部分的に棄却。**
 
-**exp6との関係**:
+- ReLU化は驚くほど無害（20ヘッドがPPL 1.1x以内、全トークン検証値）
+- しかし浮いた計算は微小（kernel化で8-20%、追加6-16トークン分）
+- Self-refinementはGPT-2では退化に向かう
+- Best-of-Nは有効だが追加計算が必要（等FLOPsでは困難）
 
-- exp6はPCA基底でW_QKを分解 → 分散0.6%に機能集中を発見
-- exp10はヘッド単位で直接ablation → PCAでは見えない機能的構造を測定
-- exp6の「ヘッドの非冗長性」結論をヘッド単位で再検証
+### 残された課題
 
-**最終ゴール（Phase 1-3全体）**:
-「Attentionを粗く・高速にし、浮いた計算をCoTに回す」アーキテクチャの実現可能性を検証。
-
-- 小さいモデル × N回再帰推論 ≥ 大きいモデル × 1回推論（同一FLOPs）を目指す
-
-### exp10A: ヘッド個別ablation
-
-- GPT-2 small（12レイヤー × 12ヘッド = 144ヘッド）
-- 各ヘッドを1個ずつゼロアウト（attention output を0に置換）
-- WikiText-2 validation set でPPL測定（baseline: ~29.79）
-- 出力: 144個の ΔPPL 値
-
-### exp10B: 重要度ランキング
-
-- ΔPPL でソートした全144ヘッドのランキング
-- ヒストグラム + レイヤー×ヘッドのヒートマップ
-- べき乗則フィット（少数ヘッドに機能集中しているか）
-
-### exp10C: 累積ablation
-
-- 重要度の低い順にヘッドを1個ずつ累積削除
-- 「削除ヘッド数 vs PPL」のパレート曲線
-- PPL 1.1倍、1.5倍、2.0倍の閾値でそれぞれ何個削除可能かを記録
-
-### exp10D: レイヤー内パターン分析
-
-- 重要ヘッドの空間分布（浅い層 vs 深い層）
-- レイヤーごとの平均ΔPPL（どのレイヤーが最も機能的に重要か）
-- exp3の浸透関数 g(l/L) との対応（g(l/L)の傾きが大きい層のヘッドが重要か？）
-
-### 成功基準（Phase 1）
-
-1. **144ヘッド中30%以上（≥43ヘッド）がPPL劣化1.1倍未満で削除可能**
-2. **重要度分布がべき乗則に従う**（少数のヘッドに機能が集中）
-3. exp3の g(l/L) と重要度分布に相関がある
+1. CUDA kernel実装（hook-basedでは速度向上しない）
+2. Instruction-tunedモデルでのself-refinement再検証
+3. GPT-2 medium/largeでのスケーリング検証
+4. ReLU化後のfinetuningによる劣化回収
 
 ## 技術スタック
 
@@ -96,7 +67,10 @@ semantic-phase-transition/
 │   ├── exp7_residual_pca.py    # 実験7 残差ストリームΔφ PCA
 │   ├── exp8_pi_trace.py        # 実験8 π探索
 │   ├── exp9_pi_convergence.py  # 実験9 π収束検証（Colab A100用）
-│   └── exp10_head_ablation.py  # 実験10 ヘッド削減 + 線形Attention + CoT回収
+│   ├── exp10_head_ablation.py  # 実験10 Phase 1: ヘッド削減
+│   ├── exp10b_mean_ablation.py # 実験10 Phase 1.5: Mean-ablation
+│   ├── exp10c_linear_attention.py # 実験10 Phase 2: 線形Attention
+│   └── exp10d_validation.py    # 実験10 Validation + Phase 3: CoT回収
 ├── src/
 │   ├── order_parameter.py
 │   ├── direction.py
@@ -124,5 +98,5 @@ semantic-phase-transition/
 - PCA以外の分解手法（ICA, sparse coding）でW_QKの機能的構造を探索
 - 低分散成分の「中身」を解釈（どのような注意パターンを符号化しているか）
 - **exp9の結果次第**: 超球面拡散モデルの理論的定式化
-- **exp10の結果次第**: 線形Attention + CoT再帰アーキテクチャの本格設計
-- **長期ビジョン**: 小モデル×高速CoT再帰 ≥ 大モデル×1回推論の等FLOPs検証
+- **exp10結論**: 等FLOPs CoT回収は困難。CUDA kernel実装 + Instruction-tunedモデルでの再検証が必要
+- **長期ビジョン**: 小モデル×高速CoT再帰 ≥ 大モデル×1回推論 → 等FLOPsでは困難と判明、追加計算許容時にのみ有効
