@@ -36,11 +36,11 @@ LLMの内部における意味処理のダイナミクスを実験的に解明�
   → 示唆的だが決定的ではない。8A: σ=1/√πを棄却できず、8B: mediumでsin(πx^α/2)がBIC最良
   → exp9でスケーリング検証を試みたが、CUDA精度問題で中断
 
-仮説5: ヘッド削減 + 線形Attention + CoT回収 (exp10) ← NEW
+仮説5: ヘッド削減 + 線形Attention + CoT回収 (exp10)
   「Attentionの精密さを下げ、浮いた計算をCoTに回すことで性能を維持できる」
-  → Phase 1: ヘッドのablationで機能的重要度ランキングを作成
-  → Phase 2: 残ったヘッドのsoftmaxを線形関数の交差に置換
-  → Phase 3: 劣化分をCoTの再帰的トークンで回収できるか検証
+  → 部分的に棄却。ReLU化は無害だが浮く計算が微小（8-20%）
+  → Best-of-Nは有効だが等FLOPsでの実現は困難
+  → Self-refinementはGPT-2では退化。Instruction-tunedモデルで再検証が必要
 ```
 
 ---
@@ -126,7 +126,7 @@ exp8の結果を受け、gpt2/medium/large/xl の4モデルで σ_free が 1/√
 
 **CUDA問題**: TF32 (TensorFloat-32) がデフォルト有効のため、float32指定でもattention計算が10ビット精度に低下し、文脈による σ の変動が消失。`torch.backends.cuda.matmul.allow_tf32 = False` の修正済みだが未検証。Colab A100での再実行が必要。
 
-### exp10: ヘッド削減 + 線形Attention + CoT回収 🔬
+### exp10: ヘッド削減 + 線形Attention + CoT回収 ✅
 
 **核心の問い**: Attentionの精密さを下げて計算を軽量化し、浮いたリソースをCoT（再帰的トークン生成）に回すことで、小さいモデルが長く考えて大きいモデルと同等の性能を出せるか？
 
@@ -152,9 +152,22 @@ GPT-2 small (144ヘッド) の個別・累積zero-ablation。機能的重要度�
 - kernel 化 (O(nd²)) により seq=1024 で attention FLOPs 19% 削減（30 ヘッド線形化時）
 - 純 ReLU > 混合戦略: 均一方式の方がヘッド間相互作用が安定
 
-#### Phase 3: CoT回収（Phase 2の結果を受けて設計中）
+#### Validation: 250Kトークン再検証 ✅
 
-- CoT生成速度測定、再帰的CoT、等計算量比較を予定
+2Kトークン推定を WikiText-2 全体（250K tokens）で再検証:
+- ベースライン PPL: 24.27 → 31.04 (+28%)。2K推定は楽観的
+- ReLU累積閾値は控えめに修正（1.1x: 30→20ヘッド、1.5x: 70→60）
+- L0H8 の定常バイアス発見はむしろ強化（219x → 303x）
+- **定性的結論は維持**: 全閾値の変化は10ヘッド以内
+
+#### Phase 3: CoT回収 ✅
+
+- **Self-refinement**: 全条件がPPL≈1.4に収束するが、greedy decodingの退化であり品質改善ではない
+- **Best-of-N**: ReLU-30@N=5 (PPL=8.68) < Baseline@N=1 (PPL=13.62)。生成多様性による品質改善は有効
+- **等FLOPs比較**: kernel化で浮くFLOPsでは追加6-16トークンしか生成できず、N増加は困難
+- **コンテキスト長**: ReLU-30の劣化比率はseq長にほぼ非依存（1.10-1.16x）
+
+**結論**: 仮説5は部分的に棄却。ReLU化は無害だが浮く計算が微小で、等FLOPsでのCoT回収は困難
 
 ---
 
@@ -200,6 +213,9 @@ python experiments/exp9_pi_convergence.py --device cuda --parts abc
 
 # ヘッド削減実験 (exp10)
 python experiments/exp10_head_ablation.py --model gpt2 --device mps --parts abcd
+python experiments/exp10b_mean_ablation.py --model gpt2 --device mps --parts efgh
+python experiments/exp10c_linear_attention.py --model gpt2 --device mps --parts ijkl
+python experiments/exp10d_validation.py --model gpt2 --device mps --parts vp
 ```
 
 ## 参考文献
