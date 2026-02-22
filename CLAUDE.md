@@ -85,6 +85,7 @@ semantic-phase-transition/
 - 型ヒント推奨
 - 実験スクリプトはargparseで `--model`, `--device`, `--output-dir` を受け付ける
 - 結果は `results/data/` にJSON、図は `results/figures/` にpng
+- **実験が完了したら `results/exp{N}_results.md` に結果レポートを書く**（例: `results/exp8_results.md`）
 
 ## 将来の発展可能性
 
