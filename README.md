@@ -126,44 +126,35 @@ exp8の結果を受け、gpt2/medium/large/xl の4モデルで σ_free が 1/√
 
 **CUDA問題**: TF32 (TensorFloat-32) がデフォルト有効のため、float32指定でもattention計算が10ビット精度に低下し、文脈による σ の変動が消失。`torch.backends.cuda.matmul.allow_tf32 = False` の修正済みだが未検証。Colab A100での再実行が必要。
 
-### exp10: ヘッド削減 + 線形Attention + CoT回収 🔬 NEW
+### exp10: ヘッド削減 + 線形Attention + CoT回収 🔬
 
 **核心の問い**: Attentionの精密さを下げて計算を軽量化し、浮いたリソースをCoT（再帰的トークン生成）に回すことで、小さいモデルが長く考えて大きいモデルと同等の性能を出せるか？
 
-**背景と動機**:
+#### Phase 1: ヘッド単位Ablation ✅
 
-- exp6で「ヘッドの非冗長性」が示唆されたが、それはPCA基底での話。ヘッド単位のablationは未検証
-- softmaxのO(n²)計算を線形関数の交差で代替すればO(n)に削減可能
-- CoTの中間トークンはattentionのコンテキスト空間を動的に拡張する効果がある（実質的にattentionの補強）
-- 再帰的にCoTトークンを再入力すれば、粗いattentionの解像度を反復的に向上できる可能性
+GPT-2 small (144ヘッド) の個別・累積zero-ablation。機能的重要度は L0 に極度集中 (Zipf α=1.37)。PPL 1.1x 以内で削除可能: 10ヘッド (7%)。
 
-#### Phase 1: ヘッド単位Ablation（M1 Mac）
+#### Phase 1.5: Mean-Ablation ✅
 
-GPT-2 smallの全12レイヤー×12ヘッド = 144ヘッドを対象に：
+ヘッド出力を平均ベクトルに置換する「粗視化」操作。L0 保護下で PPL 1.1x 以内に 25 ヘッド (19%) を粗視化可能 — zero-ablation の 2.5 倍。L0H8 の機能は 99.5% が定常バイアス（219x の ΔPPL 低減）。29 ヘッド (20%) で attention 計算が有害。
 
-- **10A: 個別ablation**: ヘッドを1個ずつゼロアウトし、WikiText-2でperplexity変化 ΔPPL を測定
-- **10B: 重要度ランキング**: ΔPPL で全144ヘッドをランキング。上位/下位の分布を可視化
-- **10C: 累積ablation**: 重要度の低い順にヘッドを削除し、PPL劣化カーブを取得。「ヘッド数 vs PPL」のパレート曲線を描く
-- **10D: レイヤー内パターン分析**: 重要なヘッドのレイヤー内分布。浅い層 vs 深い層でパターンが異なるか
+#### Phase 2: softmax線形化 ✅
 
-**成功基準（Phase 1）**:
+3方式の線形attention（ReLU, L1, identity）を比較。**ReLU が圧倒的に最良**:
 
-1. 144ヘッド中、30%以上（≥43ヘッド）がPPL劣化1.1倍未満で削除可能
-2. 重要度分布がべき乗則に従う（少数のヘッドに機能が集中している）
+| 戦略 | PPL 1.1x | PPL 1.5x | PPL 2.0x |
+|------|:--------:|:--------:|:--------:|
+| Zero-ablation | 10 | 25 | 35 |
+| Mean-ablation | 25 | 50 | 60 |
+| **ReLU linearization** | **30** | **70** | **90** |
 
-#### Phase 2: softmax線形化（Phase 1の結果次第）
+- ReLU attention は softmax に最も近い非線形性であり、132 ヘッド中 91% が ΔPPL < 1% で線形化可能
+- kernel 化 (O(nd²)) により seq=1024 で attention FLOPs 19% 削減（30 ヘッド線形化時）
+- 純 ReLU > 混合戦略: 均一方式の方がヘッド間相互作用が安定
 
-Phase 1で残ったヘッドに対して：
+#### Phase 3: CoT回収（Phase 2の結果を受けて設計中）
 
-- **10E: 線形attention置換**: softmax(QK^T/√d)V を (QK^T/√d)V に置換（正規化なし or L1正規化）
-- **10F: 交差ベースattention**: 各ヘッドが線形関数を計算し、複数ヘッドの応答の積（または閾値交差）でattentionパターンを生成
-- **10G: PPL測定**: Phase 1のヘッド削減 + Phase 2の線形化を組み合わせた場合のPPL
-
-#### Phase 3: CoT回収（Phase 2の結果次第）
-
-- **10H: CoT生成速度測定**: 軽量化されたモデルでのトークン生成速度を測定
-- **10I: 再帰的CoT**: 生成したCoTトークン列をプロンプトに追加して再推論。反復回数 vs タスク正答率を測定
-- **10J: 等計算量比較**: 「大きいモデル×1回推論」vs「小さいモデル×N回再帰推論」で同一FLOPsでの性能を比較
+- CoT生成速度測定、再帰的CoT、等計算量比較を予定
 
 ---
 
