@@ -22,12 +22,10 @@ LLMの内部における意味処理のダイナミクスと重み行列の圧�
 | exp9A       | 🔬 中断     | CUDA精度問題で未完了                               |
 | exp9B       | 🔬 予定     | 累積回転角Θの4モデルスケーリング                   |
 | exp9C       | 🔬 予定     | cos_pi_0p の全モデル検証                           |
-| **exp10A**  | 🔬 **NOW**  | ヘッド個別ablation（ΔPPL測定）                     |
-| **exp10B**  | 🔬 予定     | 重要度ランキング + 分布可視化                      |
-| **exp10C**  | 🔬 予定     | 累積ablation（パレート曲線）                       |
-| **exp10D**  | 🔬 予定     | レイヤー内パターン分析                             |
-| exp10E-G    | 📋 設計済   | softmax線形化（Phase 1の結果次第）                 |
-| exp10H-J    | 📋 設計済   | CoT回収検証（Phase 2の結果次第）                   |
+| exp10A-D    | ✅ 完了     | Phase 1: L0に機能集中、Zipf α=1.37、累積10ヘッド@1.1x |
+| exp10E-H    | ✅ 完了     | Phase 1.5: Mean-ablationで25ヘッド@1.1x（2.5x改善） |
+| **exp10 Ph2** | 📋 **NEXT** | Phase 2: softmax線形化（Go判定済）                 |
+| exp10 Ph3   | 📋 設計済   | Phase 3: CoT回収検証（Phase 2の結果次第）          |
 
 ## 現在の焦点: exp10 Phase 1（ヘッド単位Ablation）
 
